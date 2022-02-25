@@ -35,9 +35,10 @@ from jax.experimental import maps
 from jax.experimental import PartitionSpec as P
 from jax.experimental.maps import xmap
 from jax.experimental import global_device_array
+from jax.experimental import multihost_utils
 import jax.experimental.pjit as pjit_lib
 from jax.experimental.pjit import (pjit, pjit_p, with_sharding_constraint,
-                                   SpecSync, FROM_GDA)
+                                   SpecSync, FROM_GDA, AUTO)
 from jax.interpreters import pxla
 from jax.interpreters import xla
 from jax._src.lib import xla_client, xla_extension_version, xla_bridge
@@ -1170,6 +1171,144 @@ class GDAPjitTest(jtu.JaxTestCase):
         self.assertEqual(before_cache.misses, after_cache.misses)
 
 
+class AutoShardingPjitTest(jtu.JaxTestCase):
+
+  def test_pjit_gda_auto_sharding_2d(self):
+    global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    global_input_shape = (4, 2)
+
+    global_input_data = np.arange(
+        prod(global_input_shape)).reshape(global_input_shape)
+    def cb(index):
+      return global_input_data[index]
+
+    with jax._src.config.parallel_functions_output_gda(True):
+      with global_mesh:
+        f = pjit(lambda x, y: (x, y), in_axis_resources=AUTO,
+                 out_axis_resources=AUTO)
+        sharding_info = jtu.get_sharding_from_xla(
+            f, global_mesh, [global_input_shape, global_input_shape],
+            [jnp.int64, jnp.int64])
+
+        inputs = [global_device_array.GlobalDeviceArray.from_callback(
+                  global_input_shape, global_mesh, ip, cb) for ip in sharding_info.in_pspec]
+
+        gda_out1, gda_out2 = sharding_info.compiled(*inputs)
+
+        self.assertIsInstance(gda_out1, global_device_array.GlobalDeviceArray)
+        self.assertIsInstance(gda_out2, global_device_array.GlobalDeviceArray)
+        self.assertArraysEqual(multihost_utils.process_allgather(gda_out1),
+                               global_input_data)
+        self.assertArraysEqual(multihost_utils.process_allgather(gda_out2),
+                               global_input_data)
+
+  def test_pjit_gda_auto_sharding_3d(self):
+    global_mesh = jtu.create_global_mesh((2, 2, 2), ('x', 'y', 'z'))
+    global_input_shape = (2, 4, 8, 4)
+
+    global_input_data = np.arange(
+        prod(global_input_shape)).reshape(global_input_shape)
+    def cb(index):
+      return global_input_data[index]
+
+    with jax._src.config.parallel_functions_output_gda(True):
+      with global_mesh:
+        f = pjit(lambda x: x, in_axis_resources=AUTO,
+                 out_axis_resources=AUTO)
+        sharding_info = jtu.get_sharding_from_xla(
+            f, global_mesh, [global_input_shape], [jnp.int64])
+
+        inputs = [global_device_array.GlobalDeviceArray.from_callback(
+                  global_input_shape, global_mesh, ip, cb) for ip in sharding_info.in_pspec]
+
+        gda_out = sharding_info.compiled(*inputs)
+
+        self.assertIsInstance(gda_out, global_device_array.GlobalDeviceArray)
+        self.assertArraysEqual(multihost_utils.process_allgather(gda_out),
+                               global_input_data)
+
+  def test_pjit_gda_auto_sharding_1d(self):
+    global_mesh = jtu.create_global_mesh((8,), ('x'))
+    global_input_shape = (8, 2)
+
+    global_input_data = np.arange(
+        prod(global_input_shape)).reshape(global_input_shape)
+    def cb(index):
+      return global_input_data[index]
+
+    with jax._src.config.parallel_functions_output_gda(True):
+      with global_mesh:
+        f = pjit(lambda x: x, in_axis_resources=AUTO,
+                 out_axis_resources=AUTO)
+        sharding_info = jtu.get_sharding_from_xla(
+            f, global_mesh, [global_input_shape], [jnp.int64])
+
+        inputs = [global_device_array.GlobalDeviceArray.from_callback(
+                  global_input_shape, global_mesh, ip, cb) for ip in sharding_info.in_pspec]
+
+        gda_out = sharding_info.compiled(*inputs)
+
+        self.assertIsInstance(gda_out, global_device_array.GlobalDeviceArray)
+        self.assertArraysEqual(multihost_utils.process_allgather(gda_out),
+                               global_input_data)
+
+  def test_pjit_gda_auto_sharding_multiple_calls(self):
+    global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    global_input_shape = (8, 2)
+
+    global_input_data = np.arange(
+        prod(global_input_shape)).reshape(global_input_shape)
+    def cb(index):
+      return global_input_data[index]
+
+    with jax._src.config.parallel_functions_output_gda(True):
+      with global_mesh:
+        f = pjit(lambda x: x, in_axis_resources=AUTO,
+                 out_axis_resources=AUTO)
+        sharding_info = jtu.get_sharding_from_xla(
+            f, global_mesh, [global_input_shape], [jnp.int64])
+
+        inputs = [global_device_array.GlobalDeviceArray.from_callback(
+                  global_input_shape, global_mesh, ip, cb) for ip in sharding_info.in_pspec]
+
+        gda_out1 = sharding_info.compiled(*inputs)
+        gda_out2 = f(gda_out1)
+
+        self.assertIsInstance(gda_out1, global_device_array.GlobalDeviceArray)
+        self.assertIsInstance(gda_out2, global_device_array.GlobalDeviceArray)
+        self.assertArraysEqual(multihost_utils.process_allgather(gda_out1),
+                               global_input_data)
+        self.assertArraysEqual(multihost_utils.process_allgather(gda_out2),
+                               global_input_data)
+
+  def test_pjit_gda_auto_sharding_pjit_cache(self):
+    global_mesh = jtu.create_global_mesh((4, 2), ('x', 'y'))
+    global_input_shape = (8, 2)
+
+    global_input_data = np.arange(
+        prod(global_input_shape)).reshape(global_input_shape)
+    def cb(index):
+      return global_input_data[index]
+
+    with jax._src.config.parallel_functions_output_gda(True):
+      with global_mesh:
+        f = pjit(lambda x: x, in_axis_resources=AUTO,
+                 out_axis_resources=AUTO)
+        sharding_info = jtu.get_sharding_from_xla(
+            f, global_mesh, [global_input_shape], [jnp.int64])
+
+        inputs = [global_device_array.GlobalDeviceArray.from_callback(
+                  global_input_shape, global_mesh, ip, cb) for ip in sharding_info.in_pspec]
+
+        # `f` is first compjtu`get_sharding_from_xla`.
+        before_cache = pjit_lib._pjit_lower.cache_info()
+        f(*inputs)
+        after_cache = pjit_lib._pjit_lower.cache_info()
+
+        self.assertEqual(before_cache.hits + 1, after_cache.hits)
+        self.assertEqual(before_cache.misses, after_cache.misses)
+
+
 def spec_regex(s):
   return str(s).replace(r"(", r"\(").replace(r")", r"\)")
 
@@ -1424,7 +1563,7 @@ class UtilTest(jtu.JaxTestCase):
     aval = jax.core.ShapedArray((len(devices),) * dims, jnp.float32)
     def roundtrip(spec):
       op_sharding = pjit_lib.get_aval_sharding_proto(aval, spec, mesh)
-      parsed_spec = pjit_lib.parse_op_sharding(op_sharding, mesh).partitions
+      parsed_spec = pjit_lib.parse_op_sharding(op_sharding, mesh)[0].partitions
       self.assertEqual(parsed_spec[:len(spec)], spec)
       self.assertEqual(parsed_spec[len(spec):], ((),) * (len(parsed_spec) - len(spec)))
 
